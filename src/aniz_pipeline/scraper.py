@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 from collections.abc import Iterable
 
 import aiohttp
@@ -44,3 +46,16 @@ class NyaaScraper:
             except (TimeoutError, aiohttp.ClientError) as exc:
                 log.warning("Could not poll RSS feed %s: %s", url, exc)
         return releases
+
+    async def resolve_source(self, session: aiohttp.ClientSession, source: str) -> Release:
+        if source.startswith("magnet:"):
+            return infer_release("Manual upload", source, source)
+        async with session.get(source, timeout=self.timeout) as response:
+            response.raise_for_status()
+            body = html.unescape(await response.text(errors="replace"))
+        match = re.search(r"magnet:\?[^\"'<>\s]+", body)
+        if not match:
+            raise ValueError("No magnet link found at source URL")
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else "Manual upload"
+        return infer_release(title, match.group(0), source)

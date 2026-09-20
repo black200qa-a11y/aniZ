@@ -68,3 +68,48 @@ ruff check src app scripts tests
 python -m compileall -q src app scripts
 pytest -q
 ```
+
+## Control architecture
+
+### Persistent logs and FFmpeg inspection
+
+The worker configures Loguru at startup. It writes detailed download/sync/upload events to `logs/pipeline.log`, rotates at midnight, retains 14 days, and writes warning/error/critical records with source line numbers and stack traces to `logs/errors.log` with 30-day retention. `logs/` is ignored by Git.
+
+After aria2 finishes, the worker recursively selects the largest `.mkv` or `.mp4` file. Set `CONVERT_MKV_TO_MP4=true` to convert MKV to MP4 with FFmpeg stream copy (`-c copy`); no video re-encoding is performed. FFmpeg must be installed on the host or included in the container image.
+
+### Web admin dashboard
+
+Start the API and visit `http://localhost:8000/admin`. Login uses `ADMIN_PASSWORD` with a signed session cookie backed by `ADMIN_SESSION_SECRET`.
+
+The dashboard provides CPU/RAM/disk and MongoDB counts, recent episode search, manual source queueing, catalog deletion, episode resync timestamps, and a live log viewer that refreshes the last 200 lines of both log files. Manual jobs are stored in MongoDB and consumed by the worker, so the API and worker can run as separate processes.
+
+### Telegram admin bot
+
+Create a bot token with BotFather and configure:
+
+```env
+BOT_TOKEN=...
+ADMIN_USER_IDS=123456789,987654321
+```
+
+Only those numeric Telegram user IDs can use the private bot panel. Start the API process with the bot token configured; the bot registers inline-keyboard actions for system status, recent uploads with stream URLs, manual source queueing, error logs, and safe restart guidance. The restart action does not kill the process from inside Telegram; use Docker Compose/systemd restart policy to avoid corrupting downloads or sessions.
+
+## Start everything together
+
+```bash
+cp .env.example .env
+# Fill API_ID, API_HASH, STRING_SESSION, TG_CHANNEL_ID, BOT_TOKEN,
+# ADMIN_PASSWORD, ADMIN_SESSION_SECRET, ADMIN_USER_IDS, and ARIA2_SECRET.
+docker compose up -d --build mongodb aria2 api worker
+curl http://localhost:8000/api/v1/health
+# Open http://localhost:8000/admin and message /start to the admin bot.
+```
+
+Run checks before deployment:
+
+```bash
+python scripts/check_env.py
+ruff check src app scripts tests
+python -m compileall -q src app scripts
+pytest -q
+```

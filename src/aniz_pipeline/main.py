@@ -9,15 +9,18 @@ from pathlib import Path
 
 import aiohttp
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pymongo import ReturnDocument
 
 from app.core.database import Mongo
 from app.services.sync_service import CatalogSyncService
 
 from .downloader import Aria2Downloader
+from .logging_config import configure_logging
 from .models import PipelineResult, Release, completed_result
 from .scraper import NyaaScraper
 from .state import StateStore
 from .uploader import TelegramUploader
+from .video_inspector import VideoInspector
 
 log = logging.getLogger("aniz_pipeline")
 
@@ -50,6 +53,8 @@ class Settings(BaseSettings):
     max_concurrent_uploads: int = 1
     cleanup_on_upload_failure: bool = False
     log_level: str = "INFO"
+    log_dir: Path = Path("./logs")
+    convert_mkv_to_mp4: bool = False
 
     @property
     def feed_urls(self) -> list[str]: return [x.strip() for x in self.nyaa_feed_urls.split(",") if x.strip()]
@@ -73,6 +78,7 @@ class Pipeline:
         self.store = StateStore(settings.state_db_path)
         self.scraper = NyaaScraper(settings.feed_urls, settings.groups, settings.qualities)
         self.downloader = Aria2Downloader(settings.aria2_endpoint, settings.aria2_secret, settings.temp_download_dir, settings.aria2_download_timeout)
+        self.video_inspector = VideoInspector(settings.convert_mkv_to_mp4)
         self.uploader = TelegramUploader(settings.api_id, settings.api_hash, settings.string_session, settings.tg_channel_id)
         self.mongo = Mongo(settings)
         self.catalog = CatalogSyncService(self.mongo, settings.api_public_base_url, settings.tg_channel_id)
@@ -86,6 +92,8 @@ class Pipeline:
         try:
             async with self.semaphore:
                 path = await self.downloader.download(release.magnet_uri, release.magnet_hash)
+                path = self.video_inspector.pick_main_video(path.parent)
+                path = await self.video_inspector.inspect_and_prepare(path)
                 telegram = await self.uploader.upload(path)
                 result = completed_result(release, path, telegram["file_id"], telegram["message_id"], telegram.get("duration"))
                 if self.settings.mongodb_sync_enabled:
@@ -120,6 +128,14 @@ class Pipeline:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 while not self.stop_event.is_set():
                     releases = await self.scraper.poll(session)
+                    if self.settings.mongodb_sync_enabled and self.mongo.db is not None:
+                        job = await self.mongo.db.manual_jobs.find_one_and_update({"status": "PENDING"}, {"$set": {"status": "PROCESSING"}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+                        if job:
+                            try:
+                                releases.append(await self.scraper.resolve_source(session, job["source"]))
+                                await self.mongo.db.manual_jobs.update_one({"_id": job["_id"]}, {"$set": {"status": "RESOLVED"}})
+                            except Exception as exc:  # noqa: BLE001 - persist job failure and continue worker loop
+                                await self.mongo.db.manual_jobs.update_one({"_id": job["_id"]}, {"$set": {"status": "FAILED", "error": str(exc)}})
                     await asyncio.gather(*(self.process(r) for r in releases))
                     try:
                         await asyncio.wait_for(self.stop_event.wait(), timeout=self.settings.poll_interval_seconds)
@@ -139,7 +155,7 @@ def cli() -> None:
     parser.add_argument("--once", action="store_true", help="poll and process once, then exit")
     args = parser.parse_args()
     settings = Settings()
-    logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging(settings.log_level, settings.log_dir)
     pipeline = Pipeline(settings)
     if args.once:
         async def once() -> None:

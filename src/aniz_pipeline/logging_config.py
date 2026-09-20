@@ -1,28 +1,31 @@
 from __future__ import annotations
 
-import json
 import logging
 import sys
-from datetime import UTC, datetime
+from pathlib import Path
+
+from loguru import logger
 
 
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
+class InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(exception=record.exc_info, depth=6).log(level, record.getMessage())
 
 
-def configure_logging(level: str = "INFO") -> None:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter())
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+def configure_logging(level: str = "INFO", log_dir: Path = Path("./logs")) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger.remove()
+    logger.add(sys.stdout, level=level.upper(), colorize=False, enqueue=True, backtrace=True, diagnose=False,
+               format="{time:YYYY-MM-DDTHH:mm:ss.SSSZ} | {level:<8} | {name}:{line} | {message}")
+    logger.add(log_dir / "pipeline.log", level="DEBUG", rotation="00:00", retention="14 days", compression="gz", enqueue=True,
+               backtrace=True, diagnose=False, format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{line} | {message}")
+    logger.add(log_dir / "errors.log", level="WARNING", rotation="00:00", retention="30 days", compression="gz", enqueue=True,
+               backtrace=True, diagnose=True, format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{line} | {message}\n{exception}")
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    for name in ("uvicorn", "uvicorn.error", "fastapi", "pyrogram"):
+        logging.getLogger(name).handlers = [InterceptHandler()]
+        logging.getLogger(name).propagate = False

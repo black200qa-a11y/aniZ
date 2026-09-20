@@ -23,6 +23,15 @@ class AppSettings(BaseSettings):
     max_concurrent_streams: int = 8
     stream_chunk_size: int = 1024 * 1024
     log_level: str = "INFO"
+    log_dir: Path = Path("./logs")
+    admin_password: str = ""
+    admin_session_secret: str = "change-me"
+    admin_user_ids: str = ""
+    bot_token: str = ""
+    convert_mkv_to_mp4: bool = False
+    aria2_host: str = "127.0.0.1"
+    aria2_port: int = 6800
+    aria2_secret: str = ""
 
     @property
     def temp_download_dir(self) -> Path: return Path("./temp_downloads")
