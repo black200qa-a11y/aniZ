@@ -17,6 +17,8 @@ class TelegramStreamService:
     async def stream(self, *, channel_id: int, message_id: int, start: int, end: int) -> AsyncIterator[bytes]:
         if start < 0 or end < start:
             raise HTTPException(416, "Invalid byte range")
+        if self.telegram is None:
+            raise HTTPException(503, "Telegram streaming is available on the PC deployment only")
         async with self.semaphore, self.telegram.connection() as client:
                 try:
                     message = await client.get_messages(channel_id, message_id)

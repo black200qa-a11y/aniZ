@@ -9,10 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
-    api_id: int
-    api_hash: str
-    string_session: str
-    tg_channel_id: int
+    deployment_role: str = "pc"
+    api_id: int | None = None
+    api_hash: str = ""
+    string_session: str = ""
+    tg_channel_id: int | None = None
     mongodb_uri: str = "mongodb://127.0.0.1:27017"
     database_name: str = "aniz"
     mongodb_server_selection_timeout_ms: int = 3000
@@ -32,6 +33,14 @@ class AppSettings(BaseSettings):
     aria2_host: str = "127.0.0.1"
     aria2_port: int = 6800
     aria2_secret: str = ""
+
+    @property
+    def is_pc_role(self) -> bool:
+        return self.deployment_role.lower() == "pc"
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.api_id and self.api_hash and self.string_session and self.tg_channel_id)
 
     @property
     def temp_download_dir(self) -> Path: return Path("./temp_downloads")

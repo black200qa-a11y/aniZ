@@ -123,3 +123,90 @@ Open `/admin/search` after logging in to use the 30-results-per-page dashboard t
 The Telegram admin bot also supports `/search <query>`. It returns five results per page with Prev/Next inline buttons, per-result Inspect buttons, and Download buttons. Only `ADMIN_USER_IDS` can use the command or callbacks.
 
 For smart publishing, a release tagged `ara` and either `mp4` or `mkv` bypasses FFmpeg conversion completely and is uploaded in its original format. This is in addition to the global `CONVERT_MKV_TO_MP4` setting.
+
+## Hybrid deployment: Manus cloud + Windows PC
+
+Reference files: [`manus.env.example`](manus.env.example), [`pc.env.example`](pc.env.example), and [`start_aniz_pc.cmd`](start_aniz_pc.cmd).
+
+Aniz supports a split deployment in which the Manus/cloud process runs only the FastAPI dashboard/API and talks to the same remote MongoDB Atlas cluster as the local Windows process. The Windows PC runs the Telegram admin bot, RSS worker, and aria2 daemon. Telegram credentials, bot tokens, media downloads, and aria2 never need to be installed in the cloud role.
+
+### Environment split
+
+Use [`manus.env.example`](manus.env.example) for the cloud dashboard and [`pc.env.example`](pc.env.example) for the Windows PC. Both files must use the same `MONGODB_URI` and `DATABASE_NAME`. The Atlas user must permit connections from both deployment egress addresses, or use an appropriate restricted network-access policy; never use `0.0.0.0/0` in production unless you understand the exposure.
+
+The Manus dashboard needs these values:
+
+```env
+DEPLOYMENT_ROLE=cloud
+MONGODB_URI=mongodb+srv://...
+DATABASE_NAME=aniz
+ADMIN_PASSWORD=...
+ADMIN_SESSION_SECRET=...
+```
+
+For Manus hosting, provide those four secret values through the hosting platform's encrypted environment/secrets configuration, not in a chat message or committed file. `API_HOST`, `API_PORT`, `API_PUBLIC_BASE_URL`, `LOG_LEVEL`, and `LOG_DIR` are non-secret runtime settings. The cloud process intentionally does not require `API_ID`, `API_HASH`, `STRING_SESSION`, `TG_CHANNEL_ID`, `BOT_TOKEN`, or `ARIA2_SECRET`.
+
+The local PC needs the Atlas URI/database name plus `API_ID`, `API_HASH`, `STRING_SESSION`, `TG_CHANNEL_ID`, `BOT_TOKEN`, `ADMIN_USER_IDS`, `ARIA2_SECRET`, and `CONVERT_MKV_TO_MP4`. Keep the Windows `.env` file private.
+
+### Windows PC setup
+
+1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/) and select **Add Python to PATH** during installation.
+2. Install aria2 for Windows and ensure `aria2c.exe` is on PATH. Confirm with `aria2c --version`.
+3. Install FFmpeg and ensure `ffmpeg.exe` is on PATH. Confirm with `ffmpeg -version`. FFmpeg is only needed for MKV conversion when `CONVERT_MKV_TO_MP4=true`.
+4. Clone the repository and open Command Prompt in the repository directory:
+
+   ```bat
+   git clone https://github.com/black200qa-a11y/aniZ.git
+   cd aniZ
+   python -m venv .venv
+   .venv\Scripts\activate
+   python -m pip install --upgrade pip
+   pip install -e .
+   ```
+
+5. Copy the PC template to `.env`, then fill the real values:
+
+   ```bat
+   copy pc.env.example .env
+   notepad .env
+   ```
+
+6. Test that the PC can reach Atlas and authenticate Telegram:
+
+   ```bat
+   python scripts\check_env.py
+   ```
+
+   The checker is designed for the full PC environment. The Atlas URI, Telegram credentials, bot token, and aria2 secret must not contain `replace-me`.
+
+7. Double-click [`start_aniz_pc.cmd`](start_aniz_pc.cmd), or run it from Command Prompt:
+
+   ```bat
+   start_aniz_pc.cmd
+   ```
+
+   It opens three windows: local aria2 JSON-RPC on port 6800, the Aniz worker, and the Telegram admin bot. Keep all three windows open. Closing a window stops that service.
+
+### Manus dashboard startup
+
+Configure the four cloud secrets above, set `DEPLOYMENT_ROLE=cloud`, install the project dependencies, and start the API with:
+
+```bash
+pip install -e .
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Then open `/admin` on the deployed dashboard URL. The dashboard reads catalog and queue data from Atlas. Telegram streaming endpoints are intentionally unavailable in cloud role because the Telegram session remains on the PC; the health response reports MongoDB as healthy and Telegram as unavailable by design.
+
+### Exact values needed for cloud hosting
+
+To configure the Manus dashboard, the required secret payload is only:
+
+| Variable | Required value |
+|---|---|
+| `MONGODB_URI` | The complete remote MongoDB Atlas connection URI, including database credentials and options |
+| `DATABASE_NAME` | The shared database name, normally `aniz` |
+| `ADMIN_PASSWORD` | A strong password for `/admin` |
+| `ADMIN_SESSION_SECRET` | A long random secret used to sign admin sessions |
+
+Do not send `API_HASH`, `STRING_SESSION`, `BOT_TOKEN`, or other PC-only secrets to the cloud deployment. The dashboard can be started as soon as these four values are configured and Atlas network access permits the Manus runtime.

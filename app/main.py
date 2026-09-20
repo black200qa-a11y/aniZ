@@ -24,21 +24,26 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_dir)
     mongo = Mongo(settings)
-    telegram = TelegramClientManager(settings)
     await mongo.connect()
-    await telegram.start()
+    telegram = None
+    if settings.is_pc_role:
+        telegram = TelegramClientManager(settings)
+        await telegram.start()
     app.state.mongo = mongo
     app.state.telegram = telegram
     app.state.settings = settings
     app.state.admin_service = AdminService(settings.log_dir)
     app.state.streamer = TelegramStreamService(telegram, settings.effective_max_concurrent_streams, settings.stream_chunk_size)
-    app.state.admin_bot = AdminBot(settings, mongo, app.state.admin_service)
-    await app.state.admin_bot.start()
+    app.state.admin_bot = AdminBot(settings, mongo, app.state.admin_service) if telegram else None
+    if app.state.admin_bot:
+        await app.state.admin_bot.start()
     try:
         yield
     finally:
-        await telegram.stop()
-        await app.state.admin_bot.stop()
+        if telegram:
+            await telegram.stop()
+        if app.state.admin_bot:
+            await app.state.admin_bot.stop()
         await mongo.close()
 
 
@@ -52,8 +57,8 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/health")
     async def health(request: Request):
         mongo_ok = await request.app.state.mongo.ping()
-        telegram_ok = await request.app.state.telegram.health()
-        status = "ok" if mongo_ok and telegram_ok else "degraded"
+        telegram_ok = await request.app.state.telegram.health() if request.app.state.telegram else False
+        status = "ok" if mongo_ok and (not request.app.state.settings.is_pc_role or telegram_ok) else "degraded"
         return {"status": status, "mongodb": mongo_ok, "telegram": telegram_ok, "storage": "telegram" if telegram_ok else "unavailable"}
 
     return app

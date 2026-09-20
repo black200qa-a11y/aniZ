@@ -12,6 +12,8 @@ from .config import AppSettings
 class TelegramClientManager:
     def __init__(self, settings: AppSettings):
         self.settings = settings
+        if not settings.telegram_configured:
+            raise ValueError("Telegram credentials are required for the PC deployment role")
         self.client = Client("aniz-api", api_id=settings.api_id, api_hash=settings.api_hash, session_string=settings.string_session, in_memory=True)
         self._lock = asyncio.Lock()
         self._started = False
