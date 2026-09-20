@@ -3,12 +3,14 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..services.admin_service import AdminService
+from ..services.nyaa_service import NyaaSearchService
 
 router = APIRouter(tags=["admin"])
 templates = Jinja2Templates(directory=str(Path(__file__).parents[1] / "templates"))
@@ -25,6 +27,12 @@ def require_admin(request: Request) -> None:
 
 def service(request: Request) -> AdminService:
     return request.app.state.admin_service
+
+
+def nyaa_service(request: Request) -> NyaaSearchService:
+    if not hasattr(request.app.state, "nyaa_service"):
+        request.app.state.nyaa_service = NyaaSearchService()
+    return request.app.state.nyaa_service
 
 
 @router.get("/admin/login", response_class=HTMLResponse)
@@ -61,6 +69,13 @@ async def logs_page(request: Request):
     return templates.TemplateResponse("logs.html", {"request": request})
 
 
+@router.get("/admin/search", response_class=HTMLResponse)
+async def nyaa_search_page(request: Request):
+    if not logged_in(request):
+        return RedirectResponse("/admin/login", status_code=303)
+    return templates.TemplateResponse("search.html", {"request": request})
+
+
 @router.get("/admin/api/stats")
 async def stats(request: Request):
     require_admin(request)
@@ -79,6 +94,18 @@ async def activity(request: Request):
     return service(request).activity()
 
 
+@router.get("/api/v1/admin/nyaa/search")
+async def nyaa_search(request: Request, q: str = ""):
+    require_admin(request)
+    return {"query": q, "results": await nyaa_service(request).search(q, 500)}
+
+
+@router.get("/api/v1/admin/nyaa/inspect")
+async def nyaa_inspect(request: Request, view: str):
+    require_admin(request)
+    return {"view": view, "files": await nyaa_service(request).inspect(view)}
+
+
 @router.get("/admin/api/episodes")
 async def episodes(request: Request, search: str = "", limit: int = 100):
     require_admin(request)
@@ -95,6 +122,20 @@ async def manual_add(request: Request, source: str = Form(...)):
     now = datetime.now(UTC)
     result = await request.app.state.mongo.db.manual_jobs.insert_one({"source": source, "status": "PENDING", "created_at": now})
     return {"job_id": str(result.inserted_id), "status": "PENDING"}
+
+
+@router.post("/api/v1/admin/nyaa/queue")
+async def nyaa_queue(request: Request, payload: dict[str, Any]):
+    require_admin(request)
+    items = payload.get("items", [])
+    if not isinstance(items, list) or len(items) > 500:
+        raise HTTPException(400, "items must be a list of at most 500 results")
+    now = datetime.now(UTC)
+    jobs = [{"source": item.get("magnet", ""), "title": item.get("title", ""), "tags": item.get("tags", []), "nyaa_id": item.get("nyaa_id", ""), "status": "PENDING", "created_at": now} for item in items if isinstance(item, dict) and str(item.get("magnet", "")).startswith("magnet:")]
+    if not jobs:
+        raise HTTPException(400, "No valid magnet results selected")
+    result = await request.app.state.mongo.db.manual_jobs.insert_many(jobs)
+    return {"queued": len(result.inserted_ids), "status": "PENDING"}
 
 
 @router.delete("/admin/api/episodes/{stream_slug}")

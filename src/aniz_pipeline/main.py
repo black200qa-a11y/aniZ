@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pymongo import ReturnDocument
 
 from app.core.database import Mongo
+from app.services.nyaa_service import smart_tags
 from app.services.sync_service import CatalogSyncService
 
 from .downloader import Aria2Downloader
@@ -85,7 +86,7 @@ class Pipeline:
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_uploads)
         self.stop_event = asyncio.Event()
 
-    async def process(self, release: Release) -> PipelineResult | None:
+    async def process(self, release: Release, tags: list[str] | None = None) -> PipelineResult | None:
         if not await self.store.claim(release.magnet_hash, release.title):
             return None
         path: Path | None = None
@@ -93,7 +94,11 @@ class Pipeline:
             async with self.semaphore:
                 path = await self.downloader.download(release.magnet_uri, release.magnet_hash)
                 path = self.video_inspector.pick_main_video(path.parent)
-                path = await self.video_inspector.inspect_and_prepare(path)
+                effective_tags = tags or smart_tags(release.title)
+                if not ("ara" in effective_tags and ("mp4" in effective_tags or "mkv" in effective_tags)):
+                    path = await self.video_inspector.inspect_and_prepare(path)
+                else:
+                    log.info("Arabic tagged release bypasses FFmpeg conversion: %s", release.title)
                 telegram = await self.uploader.upload(path)
                 result = completed_result(release, path, telegram["file_id"], telegram["message_id"], telegram.get("duration"))
                 if self.settings.mongodb_sync_enabled:
@@ -128,15 +133,18 @@ class Pipeline:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 while not self.stop_event.is_set():
                     releases = await self.scraper.poll(session)
+                    release_tags = {release.magnet_hash: smart_tags(release.title) for release in releases}
                     if self.settings.mongodb_sync_enabled and self.mongo.db is not None:
                         job = await self.mongo.db.manual_jobs.find_one_and_update({"status": "PENDING"}, {"$set": {"status": "PROCESSING"}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
                         if job:
                             try:
-                                releases.append(await self.scraper.resolve_source(session, job["source"]))
+                                manual_release = await self.scraper.resolve_source(session, job["source"])
+                                releases.append(manual_release)
+                                release_tags[manual_release.magnet_hash] = list(job.get("tags", [])) or smart_tags(manual_release.title)
                                 await self.mongo.db.manual_jobs.update_one({"_id": job["_id"]}, {"$set": {"status": "RESOLVED"}})
                             except Exception as exc:  # noqa: BLE001 - persist job failure and continue worker loop
                                 await self.mongo.db.manual_jobs.update_one({"_id": job["_id"]}, {"$set": {"status": "FAILED", "error": str(exc)}})
-                    await asyncio.gather(*(self.process(r) for r in releases))
+                    await asyncio.gather(*(self.process(r, release_tags.get(r.magnet_hash)) for r in releases))
                     try:
                         await asyncio.wait_for(self.stop_event.wait(), timeout=self.settings.poll_interval_seconds)
                     except TimeoutError:

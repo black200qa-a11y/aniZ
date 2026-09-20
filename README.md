@@ -113,3 +113,13 @@ ruff check src app scripts tests
 python -m compileall -q src app scripts
 pytest -q
 ```
+
+## Nyaa search and smart tagging
+
+The authenticated endpoint `GET /api/v1/admin/nyaa/search?q=...` searches up to 500 Nyaa results across multiple pages. Each result includes `nyaa_id`, title, page URL, magnet, size, seeders, and smart tags: `pack`, `ara`, `eng`, `mp4`, and `mkv`. Arabic-tagged results are sorted first. `GET /api/v1/admin/nyaa/inspect?view=<numeric-id>` reads the torrent page's file list without downloading the magnet.
+
+Open `/admin/search` after logging in to use the 30-results-per-page dashboard tab. Admins can inspect file lists in a modal, select all results on the current page, and queue selected magnets into MongoDB's `manual_jobs` collection. The worker consumes those jobs and preserves the selected tags.
+
+The Telegram admin bot also supports `/search <query>`. It returns five results per page with Prev/Next inline buttons, per-result Inspect buttons, and Download buttons. Only `ADMIN_USER_IDS` can use the command or callbacks.
+
+For smart publishing, a release tagged `ara` and either `mp4` or `mkv` bypasses FFmpeg conversion completely and is uploaded in its original format. This is in addition to the global `CONVERT_MKV_TO_MP4` setting.
