@@ -10,6 +10,9 @@ from pathlib import Path
 import aiohttp
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.database import Mongo
+from app.services.sync_service import CatalogSyncService
+
 from .downloader import Aria2Downloader
 from .models import PipelineResult, Release, completed_result
 from .scraper import NyaaScraper
@@ -34,6 +37,11 @@ class Settings(BaseSettings):
     api_hash: str
     string_session: str
     tg_channel_id: int
+    mongodb_sync_enabled: bool = False
+    mongodb_uri: str = "mongodb://127.0.0.1:27017"
+    database_name: str = "aniz"
+    mongodb_server_selection_timeout_ms: int = 3000
+    api_public_base_url: str = "http://127.0.0.1:8000"
     max_concurrent_uploads: int = 1
     cleanup_on_upload_failure: bool = False
     log_level: str = "INFO"
@@ -53,6 +61,8 @@ class Pipeline:
         self.scraper = NyaaScraper(settings.feed_urls, settings.groups, settings.qualities)
         self.downloader = Aria2Downloader(settings.aria2_rpc_url, settings.aria2_secret, settings.temp_download_dir, settings.aria2_download_timeout)
         self.uploader = TelegramUploader(settings.api_id, settings.api_hash, settings.string_session, settings.tg_channel_id)
+        self.mongo = Mongo(settings)
+        self.catalog = CatalogSyncService(self.mongo, settings.api_public_base_url, settings.tg_channel_id)
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_uploads)
         self.stop_event = asyncio.Event()
 
@@ -65,6 +75,17 @@ class Pipeline:
                 path = await self.downloader.download(release.magnet_uri, release.magnet_hash)
                 telegram = await self.uploader.upload(path)
                 result = completed_result(release, path, telegram["file_id"], telegram["message_id"], telegram.get("duration"))
+                if self.settings.mongodb_sync_enabled:
+                    await self.catalog.upsert_uploaded_episode(
+                        anime_title=release.anime_title,
+                        episode_number=release.episode_number,
+                        quality=release.quality,
+                        file_format=result.format,
+                        telegram_file_id=result.telegram_file_id or "",
+                        telegram_message_id=result.telegram_message_id or 0,
+                        file_size=result.file_size_bytes or 0,
+                        duration=result.video_duration,
+                    )
                 await self.store.mark(release.magnet_hash, "COMPLETED")
                 print(json.dumps(result.as_dict(), ensure_ascii=False), flush=True)
                 path.unlink(missing_ok=True)
@@ -78,6 +99,8 @@ class Pipeline:
 
     async def run(self) -> None:
         await self.store.open()
+        if self.settings.mongodb_sync_enabled:
+            await self.mongo.connect()
         self.settings.temp_download_dir.mkdir(parents=True, exist_ok=True)
         timeout = aiohttp.ClientTimeout(total=60)
         try:
@@ -90,6 +113,8 @@ class Pipeline:
                     except TimeoutError:
                         pass
         finally:
+            if self.settings.mongodb_sync_enabled:
+                await self.mongo.close()
             await self.store.close()
 
     def stop(self) -> None:
@@ -106,11 +131,15 @@ def cli() -> None:
     if args.once:
         async def once() -> None:
             await pipeline.store.open()
+            if settings.mongodb_sync_enabled:
+                await pipeline.mongo.connect()
             try:
                 async with aiohttp.ClientSession() as session:
                     for release in await pipeline.scraper.poll(session):
                         await pipeline.process(release)
             finally:
+                if settings.mongodb_sync_enabled:
+                    await pipeline.mongo.close()
                 await pipeline.store.close()
         asyncio.run(once())
         return

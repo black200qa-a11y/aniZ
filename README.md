@@ -1,17 +1,16 @@
-# Aniz Async Media Pipeline
+# Aniz Async Media Pipeline, Catalog, and Streaming API
 
-A Python 3.11+ service that polls configured RSS feeds, filters releases, downloads new magnets through a local aria2 daemon, uploads completed media to a Telegram channel using a Pyrogram user session, emits one JSON record per completed episode, and removes local media after successful upload.
+Aniz now includes four cooperating phases: an RSS release worker, aria2 downloads, Telegram uploads, and a MongoDB/FastAPI catalog with Telegram-backed HTTP video streaming.
 
-Use this only for content you are authorized to download and redistribute. Nyaa feed formats can change, so the parser is intentionally conservative and should be tested against the feeds used by your deployment.
+Use this only for content you are authorized to download, store, and redistribute.
 
-## Features
+## Components
 
-- Async polling with `aiohttp` and `feedparser`.
-- Durable SQLite state store with an atomic claim to prevent duplicate processing across restarts.
-- aria2 retry settings and asynchronous completion polling.
-- Pyrogram MTProto upload with reconnect/retry and flood-wait handling.
-- Upload-success cleanup, with optional cleanup after failed uploads.
-- JSON output compatible with a later MongoDB callback or ingestion layer.
+- `src/aniz_pipeline/`: Phase 1 and 2 worker. Polls RSS feeds, deduplicates magnets in SQLite, downloads through aria2, uploads with Pyrogram, cleans local media, and—when `MONGODB_SYNC_ENABLED=true`—upserts anime and episode records into MongoDB.
+- `app/core/`: FastAPI settings, MongoDB lifecycle, and one cached Pyrogram client.
+- `app/services/sync_service.py`: idempotent anime/episode upserts and unique-key handling.
+- `app/services/stream_service.py`: bounded concurrent Telegram streaming.
+- `app/api/`: catalog routes and full single-range HTTP streaming route.
 
 ## Setup
 
@@ -22,46 +21,53 @@ pip install -e '.[dev]'
 cp .env.example .env
 ```
 
-Install and start aria2c on the host:
+Install and start aria2:
 
 ```bash
-sudo apt-get install aria2
+sudo apt-get install aria2 mongodb
 aria2c --enable-rpc=true --rpc-listen-all=false --rpc-listen-port=6800 --dir="$PWD/temp_downloads"
+# Start MongoDB using your OS/service-manager configuration.
 ```
 
-Create a Telegram application at [my.telegram.org](https://my.telegram.org), then generate a Pyrogram user `STRING_SESSION` using a trusted, local session-generation script. Do not commit `.env` or share the session string: it grants access to the Telegram account.
+Create a Telegram application at [my.telegram.org](https://my.telegram.org), generate a Pyrogram user session, and set `API_ID`, `API_HASH`, `STRING_SESSION`, and `TG_CHANNEL_ID`. Never commit `.env` or share the session string.
 
-Set `NYAA_FEED_URLS`, optional group/quality filters, the channel ID, and Telegram credentials in `.env`. `TG_CHANNEL_ID` can be a private channel ID such as `-1001234567890`; the authenticated user must be an administrator able to post there.
+Set `MONGODB_URI`, `DATABASE_NAME`, and `MONGODB_SYNC_ENABLED=true`. The worker creates indexes on startup. MongoDB uniqueness is enforced by `(anime_id, episode_number, quality)` for episodes and `anime_id` for anime records.
 
-## Run
+## Run both processes
 
-Process the current feed once:
-
-```bash
-aniz-pipeline --once
-```
-
-Run continuously until SIGINT/SIGTERM:
+Terminal 1, the downloader/uploader worker:
 
 ```bash
 aniz-pipeline
+# or one polling cycle:
+aniz-pipeline --once
 ```
 
-Each successful item is printed as one JSON object, for example:
+Terminal 2, the API server:
 
-```json
-{"anime_title":"Anime Name","episode_number":1090,"quality":"1080p","format":"mkv","telegram_file_id":"...","telegram_message_id":1234,"file_size_bytes":450000000,"video_duration":1440,"status":"COMPLETED","magnet_hash":"...","error":null}
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-## Production notes
+For production, run them under separate systemd/Docker/process-manager services on a persistent host. The default sandbox is not suitable for 24/7 hosting.
 
-Run the process under a supervisor such as systemd, Docker, or a process manager on a persistent host. The default sandbox is not suitable for an always-on deployment. Keep aria2 bound to localhost or protected by a firewall and RPC secret. Use a dedicated Telegram account and private channel, and rotate credentials if `.env` or the session string is exposed.
+## API
 
-The current implementation stores processing status and errors in SQLite. MongoDB can be added later by consuming `PipelineResult.as_dict()` or by inserting that dictionary immediately after the successful upload and before local cleanup. A failed item is retained as `FAILED` in the state database and is not retried automatically; this avoids repeated upload attempts and makes retry policy explicit. To reprocess a failed hash, update or delete that row after investigating the failure.
+- `GET /api/v1/health` — MongoDB, Telegram, and storage health.
+- `GET /api/v1/animes?page=1&page_size=20` — recent anime catalog.
+- `GET /api/v1/animes/{anime_id}/episodes` — episode list with stream URLs.
+- `GET /api/v1/stream/{episode_id}` — Telegram-backed video stream. Supports `Range: bytes=start-end`, suffix ranges, `206 Partial Content`, `Content-Range`, `Accept-Ranges`, and seeking-compatible `Content-Length`.
+
+The stream endpoint intentionally uses the stored `telegram_channel_id`, `telegram_message_id`, and `file_size`; it does not expose Telegram credentials or direct Telegram URLs. Concurrent streams are bounded by `STREAM_MAX_CONCURRENT`, and `STREAM_CHUNK_SIZE` controls the Pyrogram request chunk size.
+
+## JSON/MongoDB flow
+
+After a successful upload, the worker upserts the anime and episode before deleting the local file. An episode stores the Telegram identifiers, file size, duration, format, quality, and stable `stream_slug`. A MongoDB insert/update failure marks the processing attempt as failed and preserves the downloaded file unless the configured cleanup policy removes it.
 
 ## Tests
 
 ```bash
+ruff check src app tests
+python -m compileall -q src app
 pytest -q
-python -m compileall -q src
 ```
