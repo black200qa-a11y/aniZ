@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psutil
@@ -27,3 +28,22 @@ class AdminService:
         if not path.exists():
             return []
         return path.read_text(encoding="utf-8", errors="replace").splitlines()[-min(lines, 200):]
+
+    def activity(self) -> list[dict[str, int | str]]:
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        buckets = [{"hour": (now - timedelta(hours=index)).strftime("%H:%M"), "uploads": 0, "downloads": 0} for index in range(11, -1, -1)]
+        path = self.log_dir / "pipeline.log"
+        if not path.exists():
+            return buckets
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-5000:]:
+            try:
+                timestamp = datetime.fromisoformat(line[:23]).replace(tzinfo=UTC).replace(minute=0, second=0, microsecond=0)
+            except ValueError:
+                continue
+            for bucket in buckets:
+                if bucket["hour"] == timestamp.strftime("%H:%M"):
+                    lower = line.lower()
+                    if "upload" in lower: bucket["uploads"] += 1
+                    if "download" in lower: bucket["downloads"] += 1
+                    break
+        return buckets

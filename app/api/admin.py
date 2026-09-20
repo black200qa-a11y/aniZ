@@ -73,6 +73,12 @@ async def logs(request: Request, filename: str = "pipeline.log"):
     return {"filename": filename, "lines": service(request).tail(filename)}
 
 
+@router.get("/admin/api/activity")
+async def activity(request: Request):
+    require_admin(request)
+    return service(request).activity()
+
+
 @router.get("/admin/api/episodes")
 async def episodes(request: Request, search: str = "", limit: int = 100):
     require_admin(request)
