@@ -18,6 +18,8 @@ class TelegramClientManager:
 
     async def start(self) -> None:
         async with self._lock:
+            if self._started and not self.client.is_connected:
+                self._started = False
             if not self._started:
                 await self.client.start()
                 self._started = True

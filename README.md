@@ -1,73 +1,70 @@
 # Aniz Async Media Pipeline, Catalog, and Streaming API
 
-Aniz now includes four cooperating phases: an RSS release worker, aria2 downloads, Telegram uploads, and a MongoDB/FastAPI catalog with Telegram-backed HTTP video streaming.
+Aniz contains an RSS release worker, aria2 downloads, Telegram uploads, MongoDB catalog synchronization, and a FastAPI Telegram-backed range-streaming proxy. Use it only for content you are authorized to download, store, and redistribute.
 
-Use this only for content you are authorized to download, store, and redistribute.
-
-## Components
-
-- `src/aniz_pipeline/`: Phase 1 and 2 worker. Polls RSS feeds, deduplicates magnets in SQLite, downloads through aria2, uploads with Pyrogram, cleans local media, and—when `MONGODB_SYNC_ENABLED=true`—upserts anime and episode records into MongoDB.
-- `app/core/`: FastAPI settings, MongoDB lifecycle, and one cached Pyrogram client.
-- `app/services/sync_service.py`: idempotent anime/episode upserts and unique-key handling.
-- `app/services/stream_service.py`: bounded concurrent Telegram streaming.
-- `app/api/`: catalog routes and full single-range HTTP streaming route.
-
-## Setup
+## Configuration
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
 cp .env.example .env
+# Edit .env and replace every replace-me value.
 ```
 
-Install and start aria2:
+The repository includes a local `.env` template for convenience, but it is ignored by Git and contains no real credentials. Never commit a real `.env`, Telegram API hash, or Pyrogram string session.
+
+The requested variables are supported directly: `ARIA2_HOST`, `ARIA2_PORT`, `ARIA2_SECRET`, `API_PORT`, `STREAM_CHUNK_SIZE`, `MAX_CONCURRENT_STREAMS`, `NYAA_CHECK_INTERVAL_MINUTES`, `QUALITY_FILTERS`, and `RELEASE_GROUPS`. JSON array values must use valid JSON, for example `["1080p", "720p"]`.
+
+## Pre-flight diagnostics
+
+Run this before starting the worker or API:
 
 ```bash
-sudo apt-get install aria2 mongodb
-aria2c --enable-rpc=true --rpc-listen-all=false --rpc-listen-port=6800 --dir="$PWD/temp_downloads"
-# Start MongoDB using your OS/service-manager configuration.
+python scripts/check_env.py
 ```
 
-Create a Telegram application at [my.telegram.org](https://my.telegram.org), generate a Pyrogram user session, and set `API_ID`, `API_HASH`, `STRING_SESSION`, and `TG_CHANNEL_ID`. Never commit `.env` or share the session string.
+The script validates required values without printing secrets, then checks MongoDB, aria2 JSON-RPC, and Telegram MTProto authentication. It prints `[SUCCESS]` or `[FAILED]` per subsystem and exits non-zero if any check fails. A placeholder `.env` is expected to fail until you add real credentials and start the services.
 
-Set `MONGODB_URI`, `DATABASE_NAME`, and `MONGODB_SYNC_ENABLED=true`. The worker creates indexes on startup. MongoDB uniqueness is enforced by `(anime_id, episode_number, quality)` for episodes and `anime_id` for anime records.
+## Docker Compose deployment
 
-## Run both processes
+The Compose file runs MongoDB, aria2, the FastAPI API, and the Aniz worker:
 
-Terminal 1, the downloader/uploader worker:
+```bash
+cp .env.example .env
+# Set real credentials and a strong ARIA2_SECRET.
+docker compose up -d --build mongodb aria2
+python scripts/check_env.py   # use host values if running the checker on the host
+
+docker compose up -d --build api worker
+docker compose ps
+curl http://localhost:8000/api/v1/health
+```
+
+Inside Compose, `.env` should use `MONGODB_URI=mongodb://mongodb:27017` and `ARIA2_HOST=aria2`. The aria2 RPC port is bound to localhost only; the API port is configurable through `API_PORT`. Persistent Docker volumes retain MongoDB and aria2 state, while `./temp_downloads` stores only in-progress worker downloads.
+
+For a host-native deployment, use `MONGODB_URI=mongodb://127.0.0.1:27017` and `ARIA2_HOST=127.0.0.1`, then run:
 
 ```bash
 aniz-pipeline
-# or one polling cycle:
-aniz-pipeline --once
-```
-
-Terminal 2, the API server:
-
-```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-For production, run them under separate systemd/Docker/process-manager services on a persistent host. The default sandbox is not suitable for 24/7 hosting.
+Run the worker and API as separate supervised services in production. The default sandbox is not a 24/7 host.
 
-## API
+## API endpoints
 
 - `GET /api/v1/health` — MongoDB, Telegram, and storage health.
 - `GET /api/v1/animes?page=1&page_size=20` — recent anime catalog.
-- `GET /api/v1/animes/{anime_id}/episodes` — episode list with stream URLs.
-- `GET /api/v1/stream/{episode_id}` — Telegram-backed video stream. Supports `Range: bytes=start-end`, suffix ranges, `206 Partial Content`, `Content-Range`, `Accept-Ranges`, and seeking-compatible `Content-Length`.
+- `GET /api/v1/animes/{anime_id}/episodes` — episodes with stream URLs.
+- `GET /api/v1/stream/{episode_id}` — Telegram-backed video stream with single-range HTTP support, `206 Partial Content`, `Content-Range`, `Accept-Ranges`, and seeking.
 
-The stream endpoint intentionally uses the stored `telegram_channel_id`, `telegram_message_id`, and `file_size`; it does not expose Telegram credentials or direct Telegram URLs. Concurrent streams are bounded by `STREAM_MAX_CONCURRENT`, and `STREAM_CHUNK_SIZE` controls the Pyrogram request chunk size.
+## Resilience and logging
 
-## JSON/MongoDB flow
+Worker and API logs are emitted as one JSON object per line with timestamp, level, logger, message, and exception details. aria2 retries broken downloads and the worker records failures in SQLite. Pyrogram upload FloodWait errors are delayed and retried. The API restarts a dropped Pyrogram connection, bounds concurrent streams, and MongoDB startup uses bounded retry attempts; the Mongo client itself also reconnects through Motor's connection pool.
 
-After a successful upload, the worker upserts the anime and episode before deleting the local file. An episode stores the Telegram identifiers, file size, duration, format, quality, and stable `stream_slug`. A MongoDB insert/update failure marks the processing attempt as failed and preserves the downloaded file unless the configured cleanup policy removes it.
-
-## Tests
+## Tests and development
 
 ```bash
-ruff check src app tests
-python -m compileall -q src app
+pip install -e '.[dev]'
+ruff check src app scripts tests
+python -m compileall -q src app scripts
 pytest -q
 ```

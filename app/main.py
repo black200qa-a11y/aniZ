@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+
+from aniz_pipeline.logging_config import configure_logging
 
 from .api.catalog import router as catalog_router
 from .api.streaming import router as streaming_router
@@ -16,14 +17,14 @@ from .services.stream_service import TelegramStreamService
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    configure_logging(settings.log_level)
     mongo = Mongo(settings)
     telegram = TelegramClientManager(settings)
     await mongo.connect()
     await telegram.start()
     app.state.mongo = mongo
     app.state.telegram = telegram
-    app.state.streamer = TelegramStreamService(telegram, settings.stream_max_concurrent, settings.stream_chunk_size)
+    app.state.streamer = TelegramStreamService(telegram, settings.effective_max_concurrent_streams, settings.stream_chunk_size)
     try:
         yield
     finally:

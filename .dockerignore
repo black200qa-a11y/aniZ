@@ -1,0 +1,9 @@
+.env
+.git
+.gitignore
+__pycache__
+.pytest_cache
+*.py[cod]
+aniz_state.sqlite3
+temp_downloads/*
+!temp_downloads/.gitkeep

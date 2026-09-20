@@ -28,9 +28,14 @@ class Settings(BaseSettings):
     nyaa_groups: str = ""
     nyaa_qualities: str = "1080p,720p"
     nyaa_check_interval: int = 300
+    nyaa_check_interval_minutes: int = 15
+    quality_filters: str = '["1080p", "720p"]'
+    release_groups: str = '["SubsPlease", "Erai-raws"]'
     temp_download_dir: Path = Path("./temp_downloads")
     state_db_path: Path = Path("./aniz_state.sqlite3")
-    aria2_rpc_url: str = "http://127.0.0.1:6800/rpc"
+    aria2_rpc_url: str = ""
+    aria2_host: str = "127.0.0.1"
+    aria2_port: int = 6800
     aria2_secret: str = ""
     aria2_download_timeout: int = 7200
     api_id: int
@@ -47,11 +52,19 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @property
-    def feed_urls(self) -> list[str]: return self.nyaa_feed_urls.split(",")
+    def feed_urls(self) -> list[str]: return [x.strip() for x in self.nyaa_feed_urls.split(",") if x.strip()]
     @property
-    def groups(self) -> list[str]: return self.nyaa_groups.split(",")
+    def groups(self) -> list[str]:
+        try: return [str(x) for x in json.loads(self.release_groups)]
+        except (json.JSONDecodeError, TypeError): return [x.strip() for x in self.nyaa_groups.split(",") if x.strip()]
     @property
-    def qualities(self) -> list[str]: return self.nyaa_qualities.split(",")
+    def qualities(self) -> list[str]:
+        try: return [str(x) for x in json.loads(self.quality_filters)]
+        except (json.JSONDecodeError, TypeError): return [x.strip() for x in self.nyaa_qualities.split(",") if x.strip()]
+    @property
+    def aria2_endpoint(self) -> str: return self.aria2_rpc_url or f"http://{self.aria2_host}:{self.aria2_port}"
+    @property
+    def poll_interval_seconds(self) -> int: return self.nyaa_check_interval_minutes * 60 if self.nyaa_check_interval_minutes != 15 else self.nyaa_check_interval
 
 
 class Pipeline:
@@ -59,7 +72,7 @@ class Pipeline:
         self.settings = settings
         self.store = StateStore(settings.state_db_path)
         self.scraper = NyaaScraper(settings.feed_urls, settings.groups, settings.qualities)
-        self.downloader = Aria2Downloader(settings.aria2_rpc_url, settings.aria2_secret, settings.temp_download_dir, settings.aria2_download_timeout)
+        self.downloader = Aria2Downloader(settings.aria2_endpoint, settings.aria2_secret, settings.temp_download_dir, settings.aria2_download_timeout)
         self.uploader = TelegramUploader(settings.api_id, settings.api_hash, settings.string_session, settings.tg_channel_id)
         self.mongo = Mongo(settings)
         self.catalog = CatalogSyncService(self.mongo, settings.api_public_base_url, settings.tg_channel_id)
@@ -109,7 +122,7 @@ class Pipeline:
                     releases = await self.scraper.poll(session)
                     await asyncio.gather(*(self.process(r) for r in releases))
                     try:
-                        await asyncio.wait_for(self.stop_event.wait(), timeout=self.settings.nyaa_check_interval)
+                        await asyncio.wait_for(self.stop_event.wait(), timeout=self.settings.poll_interval_seconds)
                     except TimeoutError:
                         pass
         finally:

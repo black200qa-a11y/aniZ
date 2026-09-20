@@ -20,11 +20,16 @@ class AppSettings(BaseSettings):
     api_port: int = 8000
     api_public_base_url: str = "http://127.0.0.1:8000"
     stream_max_concurrent: int = 8
+    max_concurrent_streams: int = 8
     stream_chunk_size: int = 1024 * 1024
     log_level: str = "INFO"
 
     @property
     def temp_download_dir(self) -> Path: return Path("./temp_downloads")
+
+    @property
+    def effective_max_concurrent_streams(self) -> int:
+        return self.max_concurrent_streams if self.max_concurrent_streams != 8 else self.stream_max_concurrent
 
 
 @lru_cache

@@ -1,0 +1,59 @@
+services:
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  aria2:
+    image: p3terx/aria2-pro:latest
+    restart: unless-stopped
+    environment:
+      - RPC_SECRET=${ARIA2_SECRET}
+      - RPC_PORT=6800
+      - DISK_CACHE=64M
+      - IPV6_MODE=false
+    volumes:
+      - ./temp_downloads:/downloads
+      - aria2_config:/config
+    ports:
+      - "127.0.0.1:6800:6800"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"id\":\"health\",\"method\":\"aria2.getVersion\",\"params\":[\"token:${ARIA2_SECRET}\"]}' --header='Content-Type: application/json' http://127.0.0.1:6800/jsonrpc >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: aniz-pipeline
+    volumes:
+      - ./temp_downloads:/app/temp_downloads
+      - ./aniz_state.sqlite3:/app/aniz_state.sqlite3
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      aria2:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
+  aria2_config:
